@@ -69,6 +69,76 @@ def _strip_html(value: str) -> str:
     return " ".join(html.unescape(value).split())
 
 
+def _search_arxiv_via_semantic_scholar(query: str, limit: int) -> list[Article]:
+    """Find arXiv papers through Semantic Scholar when direct arXiv access is blocked."""
+    search_terms = []
+    for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9-]+", query.lower()):
+        translated = TERM_MAP.get(word)
+        if translated:
+            search_terms.extend(translated.split())
+        elif not re.search(r"[а-яё]", word):
+            search_terms.append(word)
+
+    search_text = " ".join(dict.fromkeys(search_terms)) or query
+    params = urllib.parse.urlencode({
+        "query": search_text,
+        "limit": min(max(limit * 4, limit), 50),
+        "fields": "title,authors,year,abstract,externalIds,url,openAccessPdf,venue,citationCount",
+    })
+    url = f"https://api.semanticscholar.org/graph/v1/paper/search?{params}"
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Researc-bot/1.0 (scientific research Telegram bot)",
+            "Accept": "application/json",
+        },
+    )
+
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+        payload = response.read().decode("utf-8", errors="replace")
+
+    import json
+    data = json.loads(payload)
+    results = []
+
+    for paper in data.get("data", []):
+        external_ids = paper.get("externalIds") or {}
+        arxiv_id = external_ids.get("ArXiv")
+        if not arxiv_id:
+            continue
+
+        authors = [
+            author.get("name")
+            for author in (paper.get("authors") or [])
+            if author.get("name")
+        ]
+        abs_url = f"https://arxiv.org/abs/{arxiv_id}"
+        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}"
+
+        results.append(
+            Article(
+                title=" ".join((paper.get("title") or "").split()),
+                authors=authors,
+                year=str(paper["year"]) if paper.get("year") else None,
+                abstract=" ".join((paper.get("abstract") or "").split()) or None,
+                doi=external_ids.get("DOI"),
+                url=abs_url,
+                pdf_url=pdf_url,
+                source="arXiv",
+                journal=paper.get("venue") or None,
+                raw_id=arxiv_id,
+                cited_by=paper.get("citationCount"),
+                document_type="preprint",
+            )
+        )
+
+        if len(results) >= limit:
+            break
+
+    return results
+
+
 def _search_arxiv_web(query: str, limit: int) -> list[Article]:
     terms = []
     for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9-]+", query.lower()):
@@ -156,6 +226,17 @@ def _search_arxiv_web(query: str, limit: int) -> list[Article]:
 
 
 async def search_arxiv(query: str, limit: int = 10) -> list[Article]:
+    # Direct arXiv access may return HTTP 406 in some local networks.
+    # Semantic Scholar indexes arXiv papers and gives us stable arXiv IDs/links.
+    try:
+        semantic_results = await asyncio.to_thread(
+            _search_arxiv_via_semantic_scholar, query, limit
+        )
+        if semantic_results:
+            return semantic_results
+    except Exception:
+        pass
+
     params = {
         "search_query": _build_query(query),
         "start": 0,
