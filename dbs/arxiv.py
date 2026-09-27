@@ -70,7 +70,7 @@ def _strip_html(value: str) -> str:
 
 
 def _search_arxiv_via_openalex(query: str, limit: int) -> list[Article]:
-    """Find arXiv-indexed papers through OpenAlex when direct arXiv access is blocked."""
+    """Use OpenAlex as a broad fallback when direct arXiv access is blocked."""
     terms = []
     for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9-]+", query.lower()):
         translated = TERM_MAP.get(word)
@@ -82,7 +82,7 @@ def _search_arxiv_via_openalex(query: str, limit: int) -> list[Article]:
     search_text = " ".join(dict.fromkeys(terms)) or query
     params = urllib.parse.urlencode({
         "search": search_text,
-        "per-page": 100,
+        "per-page": min(max(limit * 5, limit), 100),
     })
     url = f"https://api.openalex.org/works?{params}"
 
@@ -102,30 +102,17 @@ def _search_arxiv_via_openalex(query: str, limit: int) -> list[Article]:
     results = []
 
     for work in data.get("results", []):
+        locations = work.get("locations") or []
         arxiv_id = None
         arxiv_url = None
 
-        locations = work.get("locations") or []
         for location in locations:
             landing = location.get("landing_page_url") or ""
-            if "arxiv.org" in landing:
-                arxiv_url = landing
-                match = re.search(r"arxiv\.org/(?:abs|pdf)/([^/?#]+)", landing)
-                if match:
-                    arxiv_id = match.group(1)
+            match = re.search(r"arxiv\.org/(?:abs|pdf)/([^/?#]+)", landing)
+            if match:
+                arxiv_id = match.group(1)
+                arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
                 break
-
-        if not arxiv_id:
-            ids = work.get("ids") or {}
-            candidate = ids.get("doi") or ""
-            if "arxiv.org" in candidate:
-                match = re.search(r"arxiv\.org/(?:abs|pdf)/([^/?#]+)", candidate)
-                if match:
-                    arxiv_id = match.group(1)
-                    arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
-
-        if not arxiv_id:
-            continue
 
         authors = [
             (author.get("author") or {}).get("display_name")
@@ -140,12 +127,12 @@ def _search_arxiv_via_openalex(query: str, limit: int) -> list[Article]:
                 year=str(work["publication_year"]) if work.get("publication_year") else None,
                 abstract=None,
                 doi=(work.get("doi") or "").replace("https://doi.org/", "") or None,
-                url=arxiv_url or f"https://arxiv.org/abs/{arxiv_id}",
-                pdf_url=f"https://arxiv.org/pdf/{arxiv_id}",
-                source="arXiv",
-                raw_id=arxiv_id,
+                url=arxiv_url or work.get("doi") or work.get("id"),
+                pdf_url=f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else None,
+                source="arXiv" if arxiv_id else "OpenAlex",
+                raw_id=arxiv_id or work.get("id"),
                 cited_by=work.get("cited_by_count"),
-                document_type="preprint",
+                document_type="preprint" if arxiv_id else "article",
             )
         )
 
@@ -153,7 +140,6 @@ def _search_arxiv_via_openalex(query: str, limit: int) -> list[Article]:
             break
 
     return results
-
 
 def _search_arxiv_via_semantic_scholar(query: str, limit: int) -> list[Article]:
     """Find arXiv papers through Semantic Scholar when direct arXiv access is blocked."""
