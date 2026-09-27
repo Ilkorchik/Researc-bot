@@ -14,10 +14,12 @@ class Article:
     source: str = ""
     journal: Optional[str] = None
     raw_id: Optional[str] = None
+    cited_by: Optional[int] = None
+    document_type: Optional[str] = None
 
     @property
     def dedup_key(self) -> str:
         if self.doi:
-            return "doi:" + self.doi.lower().strip()
+            return "doi:" + self.doi.lower().replace("https://doi.org/", "").strip()
         normalized = " ".join(self.title.lower().split())
         return "title:" + normalized
