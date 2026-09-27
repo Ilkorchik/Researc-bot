@@ -82,7 +82,7 @@ def _search_arxiv_via_openalex(query: str, limit: int) -> list[Article]:
     search_text = " ".join(dict.fromkeys(terms)) or query
     params = urllib.parse.urlencode({
         "search": search_text,
-        "per-page": min(max(limit * 10, limit), 100),
+        "per-page": 100,
     })
     url = f"https://api.openalex.org/works?{params}"
 
@@ -313,24 +313,40 @@ def _search_arxiv_web(query: str, limit: int) -> list[Article]:
 
 async def search_arxiv(query: str, limit: int = 10) -> list[Article]:
     # Some networks reject arXiv directly with HTTP 406.
-    # Try public indexes first, then direct arXiv as a last resort.
-    try:
-        openalex_results = await asyncio.to_thread(
-            _search_arxiv_via_openalex, query, limit
-        )
-        if openalex_results:
-            return openalex_results
-    except Exception:
-        pass
+    # Try public indexes first, using simpler query variants before direct arXiv.
+    candidate_queries = [query]
+    words = re.findall(r"[A-Za-zА-Яа-яЁё0-9-]+", query.lower())
+    translated = []
+    for word in words:
+        mapped = TERM_MAP.get(word)
+        if mapped:
+            translated.extend(mapped.split())
+        elif not re.search(r"[а-яё]", word):
+            translated.append(word)
+    translated = list(dict.fromkeys(translated))
+    if translated:
+        candidate_queries.append(" ".join(translated))
+        if len(translated) > 3:
+            candidate_queries.append(" ".join(translated[:3]))
 
-    try:
-        semantic_results = await asyncio.to_thread(
-            _search_arxiv_via_semantic_scholar, query, limit
-        )
-        if semantic_results:
-            return semantic_results
-    except Exception:
-        pass
+    for candidate in candidate_queries:
+        try:
+            openalex_results = await asyncio.to_thread(
+                _search_arxiv_via_openalex, candidate, limit
+            )
+            if openalex_results:
+                return openalex_results
+        except Exception:
+            pass
+
+        try:
+            semantic_results = await asyncio.to_thread(
+                _search_arxiv_via_semantic_scholar, candidate, limit
+            )
+            if semantic_results:
+                return semantic_results
+        except Exception:
+            pass
 
     params = {
         "search_query": _build_query(query),
