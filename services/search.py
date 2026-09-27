@@ -11,14 +11,12 @@ from models import Article
 
 logger = logging.getLogger(__name__)
 
-
 async def safe_call(coro, source_name: str) -> tuple[str, list[Article]]:
     try:
         return source_name, await coro
     except Exception:
         logger.exception("Search failed in %s", source_name)
         return source_name, []
-
 
 async def search_all(query: str, limit: int = MAX_RESULTS_PER_SOURCE):
     tasks = [
@@ -29,10 +27,20 @@ async def search_all(query: str, limit: int = MAX_RESULTS_PER_SOURCE):
     results = await asyncio.gather(*tasks)
 
     all_articles = [article for _, items in results for article in items]
-    all_articles.extend(build_elibrary_result(query))
 
     unique = OrderedDict()
     for article in all_articles:
         unique.setdefault(article.dedup_key, article)
 
     return list(unique.values())
+
+def source_status() -> dict[str, bool]:
+    return {
+        "arXiv": True,
+        "Scopus": bool(SCOPUS_API_KEY),
+        "Web of Science": bool(WOS_API_KEY),
+        "eLIBRARY": True,
+    }
+
+def elibrary_url(query: str) -> str:
+    return build_elibrary_result(query)[0].url
