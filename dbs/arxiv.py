@@ -8,7 +8,7 @@ import feedparser
 from models import Article
 from config import REQUEST_TIMEOUT
 
-ARXIV_API = "https://export.arxiv.org/api/query"
+ARXIV_API = "http://export.arxiv.org/api/query"
 
 TERM_MAP = {
     "жизнь": "life",
