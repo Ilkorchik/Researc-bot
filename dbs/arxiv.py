@@ -69,6 +69,86 @@ def _strip_html(value: str) -> str:
     return " ".join(html.unescape(value).split())
 
 
+def _search_via_crossref(query: str, limit: int) -> list[Article]:
+    """Use Crossref as a public fallback for scholarly metadata."""
+    search_terms = []
+    for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9-]+", query.lower()):
+        translated = TERM_MAP.get(word)
+        if translated:
+            search_terms.extend(translated.split())
+        elif not re.search(r"[а-яё]", word):
+            search_terms.append(word)
+
+    search_text = " ".join(dict.fromkeys(search_terms)) or query
+    params = urllib.parse.urlencode({
+        "query.bibliographic": search_text,
+        "rows": min(max(limit, 1), 50),
+    })
+    url = f"https://api.crossref.org/works?{params}"
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Researc-bot/1.0 (scientific research Telegram bot)",
+            "Accept": "application/json",
+        },
+    )
+
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+        payload = response.read().decode("utf-8", errors="replace")
+
+    import json
+    data = json.loads(payload)
+    results = []
+
+    for work in (data.get("message") or {}).get("items", []):
+        title_list = work.get("title") or []
+        title = " ".join((title_list[0] if title_list else "").split())
+        if not title:
+            continue
+
+        authors = []
+        for author in work.get("author") or []:
+            given = (author.get("given") or "").strip()
+            family = (author.get("family") or "").strip()
+            name = " ".join(x for x in [given, family] if x)
+            if name:
+                authors.append(name)
+
+        date_parts = (
+            (work.get("published-print") or {}).get("date-parts")
+            or (work.get("published-online") or {}).get("date-parts")
+            or (work.get("issued") or {}).get("date-parts")
+            or []
+        )
+        year = str(date_parts[0][0]) if date_parts and date_parts[0] else None
+
+        doi = work.get("DOI")
+        url = f"https://doi.org/{doi}" if doi else work.get("URL")
+        journal = (work.get("container-title") or [None])[0]
+
+        results.append(
+            Article(
+                title=title,
+                authors=authors,
+                year=year,
+                abstract=None,
+                doi=doi,
+                url=url,
+                pdf_url=None,
+                source="Crossref",
+                journal=journal,
+                raw_id=doi or work.get("URL"),
+                document_type=work.get("type"),
+            )
+        )
+
+        if len(results) >= limit:
+            break
+
+    return results
+
+
 def _search_arxiv_via_openalex(query: str, limit: int) -> list[Article]:
     """Use OpenAlex as a broad fallback when direct arXiv access is blocked."""
     terms = []
