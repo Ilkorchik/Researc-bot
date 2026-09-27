@@ -1,6 +1,6 @@
-from openai import AsyncOpenAI
+import httpx
 
-from config import OPENAI_API_KEY, OPENAI_MODEL
+from config import OLLAMA_MODEL, OLLAMA_URL, REQUEST_TIMEOUT
 from models import Article
 
 
@@ -12,41 +12,69 @@ def _article_text(article: Article) -> str:
 Журнал/источник: {article.journal or article.source}
 DOI: {article.doi or "нет"}
 Аннотация: {article.abstract or "нет аннотации"}
+Ссылка: {article.url or "нет"}
 """.strip()
 
 
 async def analyze_article(article: Article) -> str:
-    if not OPENAI_API_KEY:
-        return "OPENAI_API_KEY не задан. Добавьте ключ в .env."
-
-    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-
     prompt = f"""
-Ты научный ассистент. Проанализируй библиографическую запись ниже.
-Не выдумывай факты, которых нет в тексте.
+Ты научный ассистент для университетского исследовательского проекта.
+Проанализируй библиографическую запись научной статьи ниже.
 
-Нужно вернуть на русском языке:
+Критические правила:
+- Не выдумывай факты, методы, результаты или выводы, которых нет в переданных данных.
+- Если есть только библиографическая запись и аннотация, прямо укажи, что анализ ограничен ими.
+- Не выдавай предположение за результат эксперимента.
+- Отвечай на русском языке.
 
-1. Краткое саммари (5-8 предложений).
-2. Научный анализ:
-   - цель работы;
-   - объект/система;
-   - методы;
-   - основные результаты;
-   - что авторы утверждают о механизме переноса;
-   - ограничения и что нельзя заключить из доступной аннотации.
-3. Перевод названия на русский.
-4. Перевод аннотации на русский.
-5. DOI и исходную ссылку.
+Структура ответа:
 
-Если полного текста статьи нет, прямо укажи, что анализ ограничен библиографическими данными/аннотацией.
+1. КРАТКОЕ САММАРИ
+5-8 предложений о том, что можно установить из доступных данных.
+
+2. НАУЧНЫЙ РАЗБОР
+- цель работы;
+- объект/система;
+- методы;
+- основные результаты;
+- механизм переноса, если он описан в доступных данных;
+- связь с диссоциацией/рекомбинацией молекул воды и транспортными процессами;
+- ограничения анализа.
+
+3. ПЕРЕВОД
+- название статьи на русский;
+- аннотация на русский, если аннотация предоставлена.
+
+4. БИБЛИОГРАФИЯ
+- DOI;
+- исходная ссылка.
 
 Статья:
 {_article_text(article)}
-"""
+""".strip()
 
-    response = await client.responses.create(
-        model=OPENAI_MODEL,
-        input=prompt,
-    )
-    return response.output_text
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Ты аккуратный научный ассистент. Работаешь только с предоставленными данными и явно отмечаешь ограничения."
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT * 6) as client:
+        response = await client.post(f"{OLLAMA_URL.rstrip('/')}/api/chat", json=payload)
+        response.raise_for_status()
+        data = response.json()
+
+    content = data.get("message", {}).get("content", "").strip()
+    if not content:
+        return "Локальная модель не вернула текст анализа."
+
+    return content
