@@ -69,6 +69,35 @@ def _strip_html(value: str) -> str:
     return " ".join(html.unescape(value).split())
 
 
+def _reconstruct_openalex_abstract(inverted_index) -> str | None:
+    """Rebuild OpenAlex's abstract_inverted_index into normal text."""
+    if not isinstance(inverted_index, dict) or not inverted_index:
+        return None
+
+    words = []
+    for word, positions in inverted_index.items():
+        if not isinstance(positions, list):
+            continue
+        for position in positions:
+            if isinstance(position, int) and position >= 0:
+                words.append((position, word))
+
+    if not words:
+        return None
+
+    words.sort(key=lambda item: item[0])
+    return " ".join(word for _, word in words).strip() or None
+
+
+def _crossref_abstract(work: dict) -> str | None:
+    """Extract and clean Crossref's optional abstract field."""
+    abstract = work.get("abstract")
+    if not abstract:
+        return None
+    cleaned = _strip_html(str(abstract))
+    return cleaned or None
+
+
 def _search_via_crossref(query: str, limit: int) -> list[Article]:
     """Use Crossref as a public fallback for scholarly metadata."""
     search_terms = []
@@ -126,13 +155,14 @@ def _search_via_crossref(query: str, limit: int) -> list[Article]:
         doi = work.get("DOI")
         url = f"https://doi.org/{doi}" if doi else work.get("URL")
         journal = (work.get("container-title") or [None])[0]
+        abstract = _crossref_abstract(work)
 
         results.append(
             Article(
                 title=title,
                 authors=authors,
                 year=year,
-                abstract=None,
+                abstract=abstract,
                 doi=doi,
                 url=url,
                 pdf_url=None,
@@ -199,13 +229,16 @@ def _search_arxiv_via_openalex(query: str, limit: int) -> list[Article]:
             for author in (work.get("authorships") or [])
             if (author.get("author") or {}).get("display_name")
         ]
+        abstract = _reconstruct_openalex_abstract(
+            work.get("abstract_inverted_index")
+        )
 
         results.append(
             Article(
                 title=" ".join((work.get("title") or "").split()),
                 authors=authors,
                 year=str(work["publication_year"]) if work.get("publication_year") else None,
-                abstract=None,
+                abstract=abstract,
                 doi=(work.get("doi") or "").replace("https://doi.org/", "") or None,
                 url=arxiv_url or work.get("doi") or work.get("id"),
                 pdf_url=f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else None,
