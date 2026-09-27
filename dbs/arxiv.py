@@ -69,6 +69,92 @@ def _strip_html(value: str) -> str:
     return " ".join(html.unescape(value).split())
 
 
+def _search_arxiv_via_openalex(query: str, limit: int) -> list[Article]:
+    """Find arXiv-indexed papers through OpenAlex when direct arXiv access is blocked."""
+    terms = []
+    for word in re.findall(r"[A-Za-zА-Яа-яЁё0-9-]+", query.lower()):
+        translated = TERM_MAP.get(word)
+        if translated:
+            terms.extend(translated.split())
+        elif not re.search(r"[а-яё]", word):
+            terms.append(word)
+
+    search_text = " ".join(dict.fromkeys(terms)) or query
+    params = urllib.parse.urlencode({
+        "search": search_text,
+        "per-page": min(max(limit * 10, limit), 100),
+    })
+    url = f"https://api.openalex.org/works?{params}"
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Researc-bot/1.0 (scientific research Telegram bot)",
+            "Accept": "application/json",
+        },
+    )
+
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+        payload = response.read().decode("utf-8", errors="replace")
+
+    import json
+    data = json.loads(payload)
+    results = []
+
+    for work in data.get("results", []):
+        arxiv_id = None
+        arxiv_url = None
+
+        locations = work.get("locations") or []
+        for location in locations:
+            landing = location.get("landing_page_url") or ""
+            if "arxiv.org" in landing:
+                arxiv_url = landing
+                match = re.search(r"arxiv\.org/(?:abs|pdf)/([^/?#]+)", landing)
+                if match:
+                    arxiv_id = match.group(1)
+                break
+
+        if not arxiv_id:
+            ids = work.get("ids") or {}
+            candidate = ids.get("doi") or ""
+            if "arxiv.org" in candidate:
+                match = re.search(r"arxiv\.org/(?:abs|pdf)/([^/?#]+)", candidate)
+                if match:
+                    arxiv_id = match.group(1)
+                    arxiv_url = f"https://arxiv.org/abs/{arxiv_id}"
+
+        if not arxiv_id:
+            continue
+
+        authors = [
+            (author.get("author") or {}).get("display_name")
+            for author in (work.get("authorships") or [])
+            if (author.get("author") or {}).get("display_name")
+        ]
+
+        results.append(
+            Article(
+                title=" ".join((work.get("title") or "").split()),
+                authors=authors,
+                year=str(work["publication_year"]) if work.get("publication_year") else None,
+                abstract=None,
+                doi=(work.get("doi") or "").replace("https://doi.org/", "") or None,
+                url=arxiv_url or f"https://arxiv.org/abs/{arxiv_id}",
+                pdf_url=f"https://arxiv.org/pdf/{arxiv_id}",
+                source="arXiv",
+                raw_id=arxiv_id,
+                cited_by=work.get("cited_by_count"),
+                document_type="preprint",
+            )
+        )
+
+        if len(results) >= limit:
+            break
+
+    return results
+
+
 def _search_arxiv_via_semantic_scholar(query: str, limit: int) -> list[Article]:
     """Find arXiv papers through Semantic Scholar when direct arXiv access is blocked."""
     search_terms = []
@@ -226,8 +312,17 @@ def _search_arxiv_web(query: str, limit: int) -> list[Article]:
 
 
 async def search_arxiv(query: str, limit: int = 10) -> list[Article]:
-    # Direct arXiv access may return HTTP 406 in some local networks.
-    # Semantic Scholar indexes arXiv papers and gives us stable arXiv IDs/links.
+    # Some networks reject arXiv directly with HTTP 406.
+    # Try public indexes first, then direct arXiv as a last resort.
+    try:
+        openalex_results = await asyncio.to_thread(
+            _search_arxiv_via_openalex, query, limit
+        )
+        if openalex_results:
+            return openalex_results
+    except Exception:
+        pass
+
     try:
         semantic_results = await asyncio.to_thread(
             _search_arxiv_via_semantic_scholar, query, limit
@@ -252,8 +347,12 @@ async def search_arxiv(query: str, limit: int = 10) -> list[Article]:
         feed = feedparser.parse(xml_text)
     except Exception:
         # Some networks/proxies return HTTP 406 for the arXiv API.
-        # Fall back to the public arXiv HTML search page.
-        return await asyncio.to_thread(_search_arxiv_web, query, limit)
+        # Try the public arXiv HTML search page, but do not let a blocked
+        # network endpoint crash the whole Telegram search.
+        try:
+            return await asyncio.to_thread(_search_arxiv_web, query, limit)
+        except Exception:
+            return []
 
     results = []
 
